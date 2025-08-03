@@ -28,6 +28,8 @@ struct WindowInfo {
     let ownerName: String
     let ownerPID: pid_t
     let bounds: CGRect
+    let icon: NSImage?
+    let isActive: Bool
     
     var displayTitle: String {
         if title.isEmpty {
@@ -46,6 +48,8 @@ class WindowManager {
         }
         
         var windows: [WindowInfo] = []
+        // Get currently active window ID for sorting
+        let activeWindowID = getCurrentActiveWindowID()
         
         for windowDict in windowList {
             guard let windowID = windowDict[kCGWindowNumber] as? CGWindowID,
@@ -58,26 +62,57 @@ class WindowManager {
             
             let title = windowDict[kCGWindowName] as? String ?? ""
             
-            // More permissive window filtering - include more windows
+            // More permissive window filtering
             if bounds.width > 20 && bounds.height > 20 && 
                !ownerName.contains("Window Server") && 
                ownerName != "Dock" &&
                ownerName != "SystemUIServer" &&
                ownerName != "ControlCenter" &&
-               ownerName != "NotificationCenter" {
+               ownerName != "NotificationCenter" &&
+               ownerName != "SimpleWindowSwitcher" {
+                
+                // Get app icon
+                let app = NSRunningApplication(processIdentifier: ownerPID)
+                let icon = app?.icon
+                
+                // Check if this is the active window
+                let isActive = windowID == activeWindowID
                 
                 let windowInfo = WindowInfo(
                     id: windowID,
                     title: title,
                     ownerName: ownerName,
                     ownerPID: ownerPID,
-                    bounds: bounds
+                    bounds: bounds,
+                    icon: icon,
+                    isActive: isActive
                 )
                 windows.append(windowInfo)
             }
         }
         
-        return windows
+        // Sort windows: non-active windows first, then active window
+        // This way the active window doesn't appear first in the switcher
+        return windows.sorted { window1, window2 in
+            if window1.isActive != window2.isActive {
+                return !window1.isActive // Non-active windows first
+            }
+            return window1.ownerName < window2.ownerName // Alphabetical for same active state
+        }
+    }
+    
+    static func getCurrentActiveWindowID() -> CGWindowID? {
+        // Get the currently focused window ID
+        if let windowList = CGWindowListCopyWindowInfo([.excludeDesktopElements, .optionOnScreenOnly], kCGNullWindowID) as? [[CFString: Any]] {
+            for windowDict in windowList {
+                if let windowID = windowDict[kCGWindowNumber] as? CGWindowID,
+                   let layer = windowDict[kCGWindowLayer] as? Int,
+                   layer == 0 { // Front window typically has layer 0
+                    return windowID
+                }
+            }
+        }
+        return nil
     }
     
     static func activateWindow(_ windowInfo: WindowInfo) {
@@ -98,13 +133,172 @@ class WindowManager {
     }
 }
 
-// MARK: - Minimal Console-Based Switcher
+// MARK: - Native-Style Overlay Window
+
+class NativeStyleOverlay: NSWindow {
+    private var windows: [WindowInfo] = []
+    private var selectedIndex = 0
+    private var iconViews: [NSView] = []
+    private let iconContainer = NSView()
+    private let titleLabel = NSTextField()
+    
+    override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing backingStoreType: NSWindow.BackingStoreType, defer flag: Bool) {
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 600, height: 150), 
+                   styleMask: [.borderless], 
+                   backing: .buffered, 
+                   defer: false)
+        
+        setupWindow()
+    }
+    
+    private func setupWindow() {
+        level = .floating
+        backgroundColor = .clear
+        isOpaque = false
+        hasShadow = true
+        
+        // Center on screen
+        if let screen = NSScreen.main {
+            let screenFrame = screen.visibleFrame
+            let x = screenFrame.midX - 300
+            let y = screenFrame.midY - 75
+            setFrameOrigin(NSPoint(x: x, y: y))
+        }
+        
+        // Create main background view
+        let backgroundView = NSVisualEffectView()
+        backgroundView.material = .hudWindow
+        backgroundView.blendingMode = .behindWindow
+        backgroundView.state = .active
+        backgroundView.frame = NSRect(x: 0, y: 0, width: 600, height: 150)
+        backgroundView.autoresizingMask = [.width, .height]
+        backgroundView.wantsLayer = true
+        backgroundView.layer?.cornerRadius = 12
+        
+        // Setup icon container
+        iconContainer.frame = NSRect(x: 20, y: 50, width: 560, height: 80)
+        
+        // Setup title label
+        titleLabel.isEditable = false
+        titleLabel.isBordered = false
+        titleLabel.backgroundColor = .clear
+        titleLabel.textColor = .white
+        titleLabel.font = NSFont.systemFont(ofSize: 16, weight: .medium)
+        titleLabel.alignment = .center
+        titleLabel.frame = NSRect(x: 20, y: 20, width: 560, height: 25)
+        
+        backgroundView.addSubview(iconContainer)
+        backgroundView.addSubview(titleLabel)
+        contentView?.addSubview(backgroundView)
+    }
+    
+    func updateWithWindows(_ windowList: [WindowInfo], selectedIndex: Int) {
+        self.windows = windowList
+        self.selectedIndex = selectedIndex
+        
+        // Clear existing icons
+        iconViews.forEach { $0.removeFromSuperview() }
+        iconViews.removeAll()
+        
+        let maxIcons = min(windows.count, 8) // Limit for visual clarity
+        let iconSize: CGFloat = 70
+        let spacing: CGFloat = 15
+        let totalWidth = CGFloat(maxIcons) * iconSize + CGFloat(max(0, maxIcons - 1)) * spacing
+        let startX = (iconContainer.bounds.width - totalWidth) / 2
+        
+        for i in 0..<maxIcons {
+            let window = windows[i]
+            
+            // Create icon container
+            let container = NSView()
+            container.frame = NSRect(
+                x: startX + CGFloat(i) * (iconSize + spacing),
+                y: 5,
+                width: iconSize,
+                height: iconSize
+            )
+            container.wantsLayer = true
+            container.layer?.cornerRadius = 8
+            
+            // Create icon image view
+            let imageView = NSImageView()
+            imageView.frame = NSRect(x: 5, y: 5, width: iconSize - 10, height: iconSize - 10)
+            imageView.imageScaling = .scaleProportionallyUpOrDown
+            
+            if let icon = window.icon {
+                imageView.image = icon
+            } else {
+                // Create default app icon
+                imageView.image = NSImage(named: NSImage.applicationIconName)
+            }
+            
+            container.addSubview(imageView)
+            iconContainer.addSubview(container)
+            iconViews.append(container)
+            
+            // Apply selection styling
+            if i == selectedIndex {
+                container.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.3).cgColor
+                container.layer?.borderWidth = 3
+                container.layer?.borderColor = NSColor.controlAccentColor.cgColor
+                
+                // Add subtle glow effect
+                container.layer?.shadowColor = NSColor.controlAccentColor.cgColor
+                container.layer?.shadowOffset = CGSize.zero
+                container.layer?.shadowRadius = 10
+                container.layer?.shadowOpacity = 0.5
+            } else {
+                container.layer?.backgroundColor = NSColor.clear.cgColor
+                container.layer?.borderWidth = 0
+                container.layer?.shadowOpacity = 0
+            }
+        }
+        
+        // Update title
+        if selectedIndex < windows.count {
+            let selectedWindow = windows[selectedIndex]
+            titleLabel.stringValue = selectedWindow.displayTitle
+        }
+        
+        // Adjust window width based on content
+        let newWidth = max(400, totalWidth + 40)
+        let screenFrame = NSScreen.main?.visibleFrame ?? NSRect.zero
+        let newFrame = NSRect(
+            x: screenFrame.midX - newWidth / 2,
+            y: screenFrame.midY - 75,
+            width: newWidth,
+            height: 150
+        )
+        setFrame(newFrame, display: true)
+        
+        // Update background view size
+        if let backgroundView = contentView?.subviews.first {
+            backgroundView.frame = NSRect(x: 0, y: 0, width: newWidth, height: 150)
+        }
+        
+        // Update container positions
+        iconContainer.frame = NSRect(x: 20, y: 50, width: newWidth - 40, height: 80)
+        titleLabel.frame = NSRect(x: 20, y: 20, width: newWidth - 40, height: 25)
+    }
+    
+    func show() {
+        makeKeyAndOrderFront(nil)
+    }
+    
+    func hide() {
+        orderOut(nil)
+    }
+}
+
+// MARK: - Enhanced Window Switcher
 
 class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
     private var windows: [WindowInfo] = []
     private var selectedIndex = 0
     private var isShowingSwitcher = false
     private var cmdPressed = false
+    private var overlayWindow: NativeStyleOverlay?
+    private var globalMonitor: Any?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("🚀 SimpleWindowSwitcher started")
@@ -120,17 +314,25 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
             NSWorkspace.shared.open(url)
         }
         
+        // Create overlay window once at startup
+        overlayWindow = NativeStyleOverlay(
+            contentRect: NSRect.zero,
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        
         // Disable native Cmd+Tab
         setNativeCommandTabEnabled(false)
         print("🚫 Native Cmd+Tab disabled")
         
         // Simple global key monitoring
-        NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             self?.handleGlobalEvent(event)
         }
         
-        print("⌨️  Press Cmd+Tab to activate window switcher")
-        print("📝 Console-based interface: Tab cycles, Cmd release activates")
+        print("⌨️  Press Cmd+Tab to activate native-style window switcher")
+        print("✨ Native macOS interface with app icons")
     }
     
     private func handleGlobalEvent(_ event: NSEvent) {
@@ -160,7 +362,7 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
     
     private func showWindowSwitcher() {
         print("\n" + String(repeating: "=", count: 50))
-        print("🪟 Starting window switcher session")
+        print("✨ Starting native-style window switcher")
         
         windows = WindowManager.getAllWindows()
         selectedIndex = 0
@@ -174,19 +376,22 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
         }
         
         print("📊 Found \(windows.count) windows")
-        displayCurrent()
+        updateDisplay()
+        overlayWindow?.show()
     }
     
     private func selectNext() {
+        guard !windows.isEmpty else { return }
         selectedIndex = (selectedIndex + 1) % windows.count
-        displayCurrent()
+        updateDisplay()
     }
     
-    private func displayCurrent() {
+    private func updateDisplay() {
         guard selectedIndex < windows.count else { return }
+        
         let selectedWindow = windows[selectedIndex]
-        let displayText = "(\(selectedIndex + 1)/\(windows.count)) \(selectedWindow.displayTitle)"
-        print("👉 \(displayText)")
+        overlayWindow?.updateWithWindows(windows, selectedIndex: selectedIndex)
+        print("👉 (\(selectedIndex + 1)/\(windows.count)) \(selectedWindow.displayTitle)")
     }
     
     private func activateSelectedWindow() {
@@ -198,11 +403,25 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
     private func hideSwitcher() {
         print("🔚 Session complete")
         print(String(repeating: "=", count: 50) + "\n")
+        
+        overlayWindow?.hide()
         isShowingSwitcher = false
         cmdPressed = false
+        windows.removeAll()
+        selectedIndex = 0
     }
     
     func applicationWillTerminate(_ notification: Notification) {
+        // Clean up global monitor
+        if let monitor = globalMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalMonitor = nil
+        }
+        
+        // Hide overlay window
+        overlayWindow?.hide()
+        overlayWindow = nil
+        
         setNativeCommandTabEnabled(true)
         print("✅ Native Cmd+Tab re-enabled")
     }
