@@ -24,6 +24,83 @@ func setNativeCommandTabEnabled(_ isEnabled: Bool, _ hotkeys: [CGSSymbolicHotKey
     }
 }
 
+// MARK: - Performance Cache
+
+class PerformanceCache {
+    static let shared = PerformanceCache()
+    
+    private var cachedRunningApps: [NSRunningApplication] = []
+    private var appCacheTime: TimeInterval = 0
+    private let appCacheTimeout: TimeInterval = 2.0 // Cache for 2 seconds
+    
+    private var excludedAppsCache: [String: Bool] = [:]
+    private var iconCache: [pid_t: NSImage] = [:]
+    
+    private init() {}
+    
+    func getCachedRunningApps() -> [NSRunningApplication] {
+        let now = Date().timeIntervalSince1970
+        
+        if now - appCacheTime > appCacheTimeout || cachedRunningApps.isEmpty {
+            cachedRunningApps = NSWorkspace.shared.runningApplications.filter { app in
+                app.activationPolicy == .regular && !app.isTerminated
+            }
+            appCacheTime = now
+        }
+        
+        return cachedRunningApps
+    }
+    
+    func isAppExcluded(_ appName: String) -> Bool {
+        if let cached = excludedAppsCache[appName] {
+            return cached
+        }
+        
+        let excluded = shouldExcludeApp(appName)
+        excludedAppsCache[appName] = excluded
+        return excluded
+    }
+    
+    func getCachedIcon(for pid: pid_t, app: NSRunningApplication) -> NSImage? {
+        if let cached = iconCache[pid] {
+            return cached
+        }
+        
+        if let icon = app.icon {
+            iconCache[pid] = icon
+            return icon
+        }
+        
+        return nil
+    }
+    
+    private func shouldExcludeApp(_ appName: String) -> Bool {
+        let excludedApps = [
+            "Window Server", "WindowServer",
+            "Dock", "SystemUIServer", "ControlCenter", "NotificationCenter",
+            "TextInputMenuAgent", "TextInputSwitcher",
+            "Spotlight", "Siri", "VoiceOver",
+            "AXVisualSupportAgent", "UniversalAccessAuthWarn",
+            "WiFiAgent", "UserEventAgent", "CommCenter",
+            "ReportCrash", "CrashReporter", "Problem Reporter",
+            "loginwindow", "SecurityAgent", "ScreenSaverEngine",
+            "SimpleWindowSwitcher", // Our own app
+            "Steam Helper", // Steam background processes
+            "CleanMyMac", "CleanMyMac X Business", // System cleaners
+            "Raycast", "Alfred", // Other launchers that might interfere
+        ]
+        
+        return excludedApps.contains { appName.contains($0) }
+    }
+    
+    func clearCaches() {
+        cachedRunningApps.removeAll()
+        excludedAppsCache.removeAll()
+        iconCache.removeAll()
+        appCacheTime = 0
+    }
+}
+
 // MARK: - Window Information
 
 struct WindowInfo {
@@ -32,9 +109,25 @@ struct WindowInfo {
     let ownerName: String
     let ownerPID: pid_t
     let bounds: CGRect
-    let icon: NSImage?
     let isActive: Bool
     let axElement: AXUIElement?  // Store AX element for proper switching
+    
+    // Lazy icon loading
+    private var _icon: NSImage?
+    private var iconLoaded = false
+    
+    var icon: NSImage? {
+        mutating get {
+            if !iconLoaded {
+                _icon = PerformanceCache.shared.getCachedIcon(
+                    for: ownerPID, 
+                    app: NSRunningApplication(processIdentifier: ownerPID) ?? NSRunningApplication()
+                )
+                iconLoaded = true
+            }
+            return _icon ?? NSImage(named: NSImage.applicationIconName)
+        }
+    }
     
     var displayTitle: String {
         if title.isEmpty {
@@ -42,31 +135,57 @@ struct WindowInfo {
         }
         return "\(ownerName) - \(title)"
     }
+    
+    init(id: CGWindowID, title: String, ownerName: String, ownerPID: pid_t, bounds: CGRect, isActive: Bool, axElement: AXUIElement?) {
+        self.id = id
+        self.title = title
+        self.ownerName = ownerName
+        self.ownerPID = ownerPID
+        self.bounds = bounds
+        self.isActive = isActive
+        self.axElement = axElement
+    }
 }
 
 // MARK: - AX Window Manager (like alt-tab-macos)
 
 class WindowManager {
     static func getAllWindows() -> [WindowInfo] {
+        let startTime = Date()
         var windows: [WindowInfo] = []
         let activeWindowID = getCurrentActiveWindowID()
         
-        // Get all running applications with regular activation policy
-        let runningApps = NSWorkspace.shared.runningApplications.filter { app in
-            app.activationPolicy == .regular && !app.isTerminated
-        }
+        // Use cached running applications
+        let runningApps = PerformanceCache.shared.getCachedRunningApps()
+        
+        // Process apps concurrently for better performance
+        let dispatchGroup = DispatchGroup()
+        let queue = DispatchQueue.global(qos: .userInteractive)
+        let syncQueue = DispatchQueue(label: "windows.sync")
         
         for app in runningApps {
             guard let appName = app.localizedName else { continue }
             
-            // Skip excluded apps
-            if shouldExcludeApp(appName) {
+            // Skip excluded apps using cache
+            if PerformanceCache.shared.isAppExcluded(appName) {
                 continue
             }
             
-            let appWindows = getWindowsForApp(app)
-            windows.append(contentsOf: appWindows)
+            dispatchGroup.enter()
+            queue.async {
+                let appWindows = getWindowsForApp(app, activeWindowID: activeWindowID)
+                
+                syncQueue.async {
+                    windows.append(contentsOf: appWindows)
+                    dispatchGroup.leave()
+                }
+            }
         }
+        
+        dispatchGroup.wait()
+        
+        let elapsedTime = Date().timeIntervalSince(startTime)
+        print("⏱️ Window discovery took \(String(format: "%.3f", elapsedTime))s")
         
         // Sort windows: non-active windows first, then active window
         return windows.sorted { window1, window2 in
@@ -80,14 +199,13 @@ class WindowManager {
         }
     }
     
-    private static func getWindowsForApp(_ app: NSRunningApplication) -> [WindowInfo] {
+    private static func getWindowsForApp(_ app: NSRunningApplication, activeWindowID: CGWindowID?) -> [WindowInfo] {
         var windows: [WindowInfo] = []
-        let activeWindowID = getCurrentActiveWindowID()
         
         let appRef = AXUIElementCreateApplication(app.processIdentifier)
         
         do {
-            // Get windows using AX API (like alt-tab-macos)
+            // Get windows using optimized AX API
             let axWindows = try getAXWindows(appRef, app.processIdentifier)
             
             for axWindow in axWindows {
@@ -117,8 +235,8 @@ class WindowManager {
             axWindows.append(contentsOf: windows)
         }
         
-        // Also try brute force approach (like alt-tab-macos)
-        let bruteForceWindows = getWindowsByBruteForce(pid)
+        // Optimized brute force approach - reduced from 500 to 100 iterations
+        let bruteForceWindows = getWindowsByBruteForce(pid, maxIterations: 100)
         axWindows.append(contentsOf: bruteForceWindows)
         
         // Remove duplicates
@@ -142,7 +260,7 @@ class WindowManager {
         return filteredWindows
     }
     
-    private static func getWindowsByBruteForce(_ pid: pid_t) -> [AXUIElement] {
+    private static func getWindowsByBruteForce(_ pid: pid_t, maxIterations: Int = 100) -> [AXUIElement] {
         var axWindows: [AXUIElement] = []
         
         // Create remote token for brute force (like alt-tab-macos)
@@ -151,8 +269,8 @@ class WindowManager {
         remoteToken.replaceSubrange(4..<8, with: withUnsafeBytes(of: Int32(0)) { Data($0) })
         remoteToken.replaceSubrange(8..<12, with: withUnsafeBytes(of: Int32(0x636f636f)) { Data($0) })
         
-        // Iterate through possible element IDs
-        for axUiElementId: UInt64 in 0..<500 { // Reduced from 1000 for performance
+        // Reduced iterations for better performance
+        for axUiElementId: UInt64 in 0..<UInt64(maxIterations) {
             remoteToken.replaceSubrange(12..<20, with: withUnsafeBytes(of: axUiElementId) { Data($0) })
             
             if let axUiElement = _AXUIElementCreateWithRemoteToken(remoteToken as CFData)?.takeRetainedValue() {
@@ -215,31 +333,11 @@ class WindowManager {
             ownerName: app.localizedName ?? "Unknown",
             ownerPID: app.processIdentifier,
             bounds: finalBounds,
-            icon: app.icon,
             isActive: isActive,
             axElement: axWindow  // Store AX element for proper window switching
         )
         
         return windowInfo
-    }
-    
-    private static func shouldExcludeApp(_ appName: String) -> Bool {
-        let excludedApps = [
-            "Window Server", "WindowServer",
-            "Dock", "SystemUIServer", "ControlCenter", "NotificationCenter",
-            "TextInputMenuAgent", "TextInputSwitcher",
-            "Spotlight", "Siri", "VoiceOver",
-            "AXVisualSupportAgent", "UniversalAccessAuthWarn",
-            "WiFiAgent", "UserEventAgent", "CommCenter",
-            "ReportCrash", "CrashReporter", "Problem Reporter",
-            "loginwindow", "SecurityAgent", "ScreenSaverEngine",
-            "SimpleWindowSwitcher", // Our own app
-            "Steam Helper", // Steam background processes
-            "CleanMyMac", "CleanMyMac X Business", // System cleaners
-            "Raycast", "Alfred", // Other launchers that might interfere
-        ]
-        
-        return excludedApps.contains { appName.contains($0) }
     }
     
     static func getCurrentActiveWindowID() -> CGWindowID? {
@@ -390,7 +488,6 @@ class NativeStyleOverlay: NSWindow {
         
         // Calculate required space for grid
         let totalWidth = CGFloat(iconsPerRow) * iconSize + CGFloat(max(0, iconsPerRow - 1)) * spacing
-        let totalHeight = CGFloat(maxRows) * iconSize + CGFloat(max(0, maxRows - 1)) * spacing
         
         // Calculate dynamic window size based on actual content
         let visibleWindowCount = min(windows.count, maxVisibleIcons)
@@ -451,11 +548,9 @@ class NativeStyleOverlay: NSWindow {
             imageView.frame = NSRect(x: 5, y: 5, width: iconSize - 10, height: iconSize - 10)
             imageView.imageScaling = .scaleProportionallyUpOrDown
             
-            if let icon = window.icon {
-                imageView.image = icon
-            } else {
-                imageView.image = NSImage(named: NSImage.applicationIconName)
-            }
+            // Use mutable copy to access lazy-loaded icon
+            var mutableWindow = window
+            imageView.image = mutableWindow.icon
             
             container.addSubview(imageView)
             iconContainer.addSubview(container)
@@ -539,10 +634,9 @@ class NativeStyleOverlay: NSWindow {
             previewView.imageScaling = .scaleProportionallyDown
         } else {
             // Fallback: show app icon in preview
-            if let icon = window.icon {
-                previewView.image = icon
-                previewView.imageScaling = .scaleProportionallyDown
-            }
+            var mutableWindow = window
+            previewView.image = mutableWindow.icon
+            previewView.imageScaling = .scaleProportionallyDown
         }
         
         previewContainer.addSubview(previewView)
@@ -552,7 +646,6 @@ class NativeStyleOverlay: NSWindow {
     private func getCGImageForWindow(_ window: WindowInfo) -> CGImage? {
         let windowID = window.id
         
-        let windowIDNumber = NSNumber(value: windowID)
         let imageRef = CGWindowListCreateImage(
             CGRect.null,
             .optionIncludingWindow,
@@ -607,6 +700,12 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
+        
+        // Warm up performance cache in background
+        DispatchQueue.global(qos: .background).async {
+            _ = PerformanceCache.shared.getCachedRunningApps()
+            print("📦 Performance cache warmed up")
+        }
         
         // Disable native Cmd+Tab
         setNativeCommandTabEnabled(false)
@@ -668,9 +767,12 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
     
     private func showWindowSwitcher() {
         print("\n" + String(repeating: "=", count: 50))
-        print("🔍 Starting AX-based window switcher")
+        print("🔍 Starting optimized window switcher")
         
+        let startTime = Date()
         windows = WindowManager.getAllWindows()
+        let elapsedTime = Date().timeIntervalSince(startTime)
+        
         selectedIndex = 0
         isShowingSwitcher = true
         cmdPressed = true
@@ -681,7 +783,7 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
             return
         }
         
-        print("📊 Found \(windows.count) windows")
+        print("📊 Found \(windows.count) windows in \(String(format: "%.3f", elapsedTime))s")
         updateDisplay()
         overlayWindow?.show()
     }
@@ -737,6 +839,9 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
         cmdPressed = false
         windows.removeAll()
         selectedIndex = 0
+        
+        // Optionally clear caches after extended use to free memory
+        // PerformanceCache.shared.clearCaches()
     }
     
     func applicationWillTerminate(_ notification: Notification) {
