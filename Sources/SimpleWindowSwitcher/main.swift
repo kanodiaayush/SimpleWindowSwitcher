@@ -748,6 +748,8 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
                     selectDown()
                 case 126: // Up arrow - move up one row
                     selectUp()
+                case 53: // Escape key - cancel and close switcher
+                    cancelSwitcher()
                 default:
                     break
                 }
@@ -874,6 +876,19 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
         guard selectedIndex < windows.count else { return }
         let selectedWindow = windows[selectedIndex]
         WindowManager.activateWindow(selectedWindow)
+    }
+    
+    private func cancelSwitcher() {
+        print("❌ Window switching cancelled")
+        print(String(repeating: "=", count: 50) + "\n")
+        
+        overlayWindow?.hide()
+        isShowingSwitcher = false
+        cmdPressed = false
+        windows.removeAll()
+        selectedIndex = 0
+        
+        // Don't activate any window - just cancel the operation
     }
     
     private func hideSwitcher() {
