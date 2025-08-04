@@ -734,6 +734,11 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
     private var globalMonitor: Any?
     private var localMonitor: Any?
     
+    // For Cmd+` app-specific window cycling
+    private var currentAppWindows: [WindowInfo] = []
+    private var currentAppIndex = 0
+    private var isShowingAppSwitcher = false
+    
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("🚀 SimpleWindowSwitcher started")
         
@@ -777,19 +782,25 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
         }
         
         print("⌨️  Press Cmd+Tab to activate AX-based window switcher")
+        print("⌨️  Press Cmd+` to cycle through current app windows")
         print("🔍 Using Accessibility API for comprehensive window detection")
     }
     
     private func handleLocalEvent(_ event: NSEvent) -> NSEvent? {
         // When switcher is active, we capture and handle arrow keys locally
         // Return nil to consume the event and prevent it from propagating
-        if isShowingSwitcher && event.type == .keyDown {
+        if (isShowingSwitcher || isShowingAppSwitcher) && event.type == .keyDown {
             let keyCode = event.keyCode
             
             switch keyCode {
             case 123, 124, 125, 126, 53: // Arrow keys and Escape
                 handleGlobalEvent(event)
                 return nil // Consume the event
+            case 50: // Tilde key for app switcher
+                if isShowingAppSwitcher {
+                    handleGlobalEvent(event)
+                    return nil // Consume the event
+                }
             default:
                 break
             }
@@ -827,10 +838,34 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
                 default:
                     break
                 }
+            } else if isShowingAppSwitcher {
+                // Handle navigation when app switcher is open
+                switch keyCode {
+                case 50: // Tilde key with Cmd - continue cycling
+                    if modifiers.contains(.command) {
+                        if modifiers.contains(.shift) {
+                            selectPreviousAppWindow()
+                        } else {
+                            selectNextAppWindow()
+                        }
+                    }
+                case 123: // Left arrow
+                    selectPreviousAppWindow()
+                case 124: // Right arrow
+                    selectNextAppWindow()
+                case 53: // Escape key - cancel and close switcher
+                    cancelAppSwitcher()
+                default:
+                    break
+                }
             } else {
                 // Check for Cmd+Tab to start switcher
                 if keyCode == 48 && modifiers.contains(.command) { // Tab key with Cmd
                     showWindowSwitcher()
+                }
+                // Check for Cmd+` to start current app window switcher
+                else if keyCode == 50 && modifiers.contains(.command) { // Tilde/backtick key with Cmd
+                    showCurrentAppWindowSwitcher()
                 }
             }
         } else if event.type == .flagsChanged {
@@ -838,9 +873,14 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
             cmdPressed = event.modifierFlags.contains(.command)
             
             // Cmd key was released
-            if wasCmdPressed && !cmdPressed && isShowingSwitcher {
-                activateSelectedWindow()
-                hideSwitcher()
+            if wasCmdPressed && !cmdPressed {
+                if isShowingSwitcher {
+                    activateSelectedWindow()
+                    hideSwitcher()
+                } else if isShowingAppSwitcher {
+                    activateSelectedAppWindow()
+                    hideAppSwitcher()
+                }
             }
         }
     }
@@ -977,6 +1017,95 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
         
         // Optionally clear caches after extended use to free memory
         // PerformanceCache.shared.clearCaches()
+    }
+    
+    // MARK: - Current App Window Switching (Cmd+`)
+    
+    private func showCurrentAppWindowSwitcher() {
+        print("\n" + String(repeating: "-", count: 30))
+        print("🔄 Starting current app window switcher")
+        
+        guard let frontmostApp = NSWorkspace.shared.frontmostApplication,
+              let appName = frontmostApp.localizedName else {
+            print("❌ Could not get frontmost application")
+            return
+        }
+        
+        print("🎯 Switching windows for: \(appName)")
+        
+        let startTime = Date()
+        let allWindows = WindowManager.getAllWindows()
+        
+        // Filter to only windows from the current app
+        currentAppWindows = allWindows.filter { window in
+            window.ownerPID == frontmostApp.processIdentifier
+        }
+        
+        let elapsedTime = Date().timeIntervalSince(startTime)
+        
+        if currentAppWindows.count <= 1 {
+            print("ℹ️  Only \(currentAppWindows.count) window(s) for \(appName) - no need to switch")
+            return
+        }
+        
+        // Start with index 1 (second window) since index 0 is currently active
+        currentAppIndex = 1
+        isShowingAppSwitcher = true
+        cmdPressed = true
+        
+        print("📊 Found \(currentAppWindows.count) windows for \(appName) in \(String(format: "%.3f", elapsedTime))s")
+        
+        // Show the visual overlay with current app windows
+        updateAppDisplay()
+        overlayWindow?.show()
+    }
+    
+    private func updateAppDisplay() {
+        guard currentAppIndex < currentAppWindows.count else { return }
+        
+        let selectedWindow = currentAppWindows[currentAppIndex]
+        overlayWindow?.updateWithWindows(currentAppWindows, selectedIndex: currentAppIndex)
+        print("👉 (\(currentAppIndex + 1)/\(currentAppWindows.count)) \(selectedWindow.displayTitle)")
+    }
+    
+    private func selectNextAppWindow() {
+        guard !currentAppWindows.isEmpty else { return }
+        currentAppIndex = (currentAppIndex + 1) % currentAppWindows.count
+        updateAppDisplay()
+    }
+    
+    private func selectPreviousAppWindow() {
+        guard !currentAppWindows.isEmpty else { return }
+        currentAppIndex = currentAppIndex > 0 ? currentAppIndex - 1 : currentAppWindows.count - 1
+        updateAppDisplay()
+    }
+    
+    private func activateSelectedAppWindow() {
+        guard currentAppIndex < currentAppWindows.count else { return }
+        let selectedWindow = currentAppWindows[currentAppIndex]
+        WindowManager.activateWindow(selectedWindow)
+    }
+    
+    private func cancelAppSwitcher() {
+        print("❌ App window switching cancelled")
+        print(String(repeating: "-", count: 30) + "\n")
+        
+        overlayWindow?.hide()
+        isShowingAppSwitcher = false
+        cmdPressed = false
+        currentAppWindows.removeAll()
+        currentAppIndex = 0
+    }
+    
+    private func hideAppSwitcher() {
+        print("🔚 App window switch complete")
+        print(String(repeating: "-", count: 30) + "\n")
+        
+        overlayWindow?.hide()
+        isShowingAppSwitcher = false
+        cmdPressed = false
+        currentAppWindows.removeAll()
+        currentAppIndex = 0
     }
     
     func applicationWillTerminate(_ notification: Notification) {
