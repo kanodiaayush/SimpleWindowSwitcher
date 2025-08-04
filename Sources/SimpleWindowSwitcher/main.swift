@@ -893,7 +893,8 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
         windows = WindowManager.getAllWindows()
         let elapsedTime = Date().timeIntervalSince(startTime)
         
-        selectedIndex = 0
+        // Start with index 1 (second window) since index 0 is currently active
+        selectedIndex = windows.count > 1 ? 1 : 0
         isShowingSwitcher = true
         cmdPressed = true
         
