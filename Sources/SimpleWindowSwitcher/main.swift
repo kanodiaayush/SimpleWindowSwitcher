@@ -398,6 +398,83 @@ class WindowManager {
         return nil
     }
     
+    static func forceWindowToFront(_ windowInfo: WindowInfo) {
+        print("🔨 Last resort: Simulating click on window: \(windowInfo.displayTitle)")
+        
+        guard let app = NSRunningApplication(processIdentifier: windowInfo.ownerPID) else {
+            print("🔨 No app found for PID: \(windowInfo.ownerPID)")
+            return
+        }
+        
+        // Method 1: Try to get window position and simulate a click
+        if let axElement = windowInfo.axElement {
+            var positionRef: CFTypeRef?
+            let posResult = AXUIElementCopyAttributeValue(axElement, kAXPositionAttribute as CFString, &positionRef)
+            
+            var sizeRef: CFTypeRef?
+            let sizeResult = AXUIElementCopyAttributeValue(axElement, kAXSizeAttribute as CFString, &sizeRef)
+            
+            if posResult == .success && sizeResult == .success,
+               let position = positionRef as? CGPoint,
+               let size = sizeRef as? CGSize {
+                
+                // Calculate center of window
+                let centerX = position.x + size.width / 2
+                let centerY = position.y + size.height / 2
+                let clickPoint = CGPoint(x: centerX, y: centerY)
+                
+                print("🔨 Attempting click at (\(centerX), \(centerY))")
+                
+                // Create and post a mouse click event
+                if let clickEvent = CGEvent(mouseEventSource: nil, 
+                                          mouseType: .leftMouseDown, 
+                                          mouseCursorPosition: clickPoint, 
+                                          mouseButton: .left) {
+                    
+                    // First activate the app
+                    app.activate(options: [.activateIgnoringOtherApps])
+                    
+                    // Then simulate the click
+                    clickEvent.post(tap: .cghidEventTap)
+                    
+                    // Release the click
+                    if let releaseEvent = CGEvent(mouseEventSource: nil,
+                                                mouseType: .leftMouseUp,
+                                                mouseCursorPosition: clickPoint,
+                                                mouseButton: .left) {
+                        releaseEvent.post(tap: .cghidEventTap)
+                    }
+                    
+                    print("🔨 Simulated click sent successfully")
+                } else {
+                    print("🔨 Failed to create click event")
+                }
+            } else {
+                print("🔨 Could not get window position/size")
+            }
+        }
+        
+        // Method 2: Try Command+` (backtick) to cycle through app windows
+        if let cmdTildeDown = CGEvent(keyboardEventSource: nil, virtualKey: 50, keyDown: true) { // 50 is backtick
+            cmdTildeDown.flags = .maskCommand
+            if let cmdTildeUp = CGEvent(keyboardEventSource: nil, virtualKey: 50, keyDown: false) {
+                cmdTildeUp.flags = .maskCommand
+                
+                // First bring app to front
+                app.activate(options: [])
+                
+                // Small delay
+                usleep(50000) // 50ms
+                
+                // Send Cmd+` to cycle windows within the app
+                cmdTildeDown.post(tap: .cghidEventTap)
+                cmdTildeUp.post(tap: .cghidEventTap)
+                
+                print("🔨 Sent Cmd+` to cycle app windows")
+            }
+        }
+    }
+    
     static func activateWindow(_ windowInfo: WindowInfo) {
         print("→ Activating: \(windowInfo.displayTitle)")
         
@@ -414,20 +491,65 @@ class WindowManager {
         // Record this window activation for MRU tracking
         PerformanceCache.shared.recordWindowActivation(windowInfo)
         
-        // First activate the application
-        let appSuccess = app.activate(options: [.activateIgnoringOtherApps])
+        // Try multiple activation strategies for stubborn apps like Slack
+        var activationSuccess = false
         
-        // Then focus the specific window using AX API
-        if let axElement = windowInfo.axElement {
-            let focusResult = AXUIElementPerformAction(axElement, kAXRaiseAction as CFString)
-            if focusResult == .success {
-                // Also try to make it the main window
-                AXUIElementPerformAction(axElement, kAXPressAction as CFString)
-            }
-            print("✓ App activation: \(appSuccess), Window focus: \(focusResult == .success)")
-        } else {
-            print("✓ App activation: \(appSuccess) (no AX element for window focus)")
+        // Strategy 1: Activate app first (for some apps this works better)
+        let appSuccess1 = app.activate(options: [])
+        if appSuccess1 {
+            activationSuccess = true
         }
+        
+        // Strategy 2: Focus the specific window using AX API
+        if let axElement = windowInfo.axElement {
+            // Try to raise the window first
+            let raiseResult = AXUIElementPerformAction(axElement, kAXRaiseAction as CFString)
+            
+            // Try to make it the main window  
+            let pressResult = AXUIElementPerformAction(axElement, kAXPressAction as CFString)
+            
+            // Also try to set focus directly
+            let focusResult = AXUIElementSetAttributeValue(axElement, kAXMainAttribute as CFString, kCFBooleanTrue)
+            
+            // Try to set it as focused element
+            let focusedResult = AXUIElementSetAttributeValue(axElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            
+            print("✓ Window raise: \(raiseResult == .success), press: \(pressResult == .success), focus: \(focusResult == .success), focused: \(focusedResult == .success)")
+            
+            if raiseResult == .success || pressResult == .success || focusResult == .success {
+                activationSuccess = true
+            }
+        }
+        
+        // Strategy 3: Force app activation with different options if previous failed
+        if !activationSuccess {
+            let appSuccess2 = app.activate(options: [.activateIgnoringOtherApps])
+            if appSuccess2 {
+                activationSuccess = true
+                print("✓ App activation: force successful")
+            }
+        }
+        
+        // Strategy 4: Fallback activation
+        if !activationSuccess {
+            let fallbackSuccess = app.activate()
+            if fallbackSuccess {
+                activationSuccess = true
+                print("✓ App activation: fallback successful")
+            }
+        }
+        
+        // Strategy 5: Last resort - try to bring all app windows to front
+        if !activationSuccess {
+            app.unhide()
+            let finalAttempt = app.activate(options: [.activateAllWindows])
+            print("✓ App activation attempts: \(appSuccess1) -> force: failed -> fallback: failed -> final: \(finalAttempt)")
+        } else {
+            print("✓ App activation: successful")
+        }
+        
+        // Final strategy: Always try the force method immediately
+        forceWindowToFront(windowInfo)
     }
 }
 
