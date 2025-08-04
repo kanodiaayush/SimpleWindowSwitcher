@@ -731,7 +731,7 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
     private var globalMonitor: Any?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
-        print("🚀 SimpleWindowSwitcher started")
+        print("🚀 SimpleWindowSwitcher started - visible in dock for easy quitting")
         
         // Check for accessibility permissions
         if !AXIsProcessTrusted() {
@@ -767,8 +767,9 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
             self?.handleGlobalEvent(event)
         }
         
-        print("⌨️  Press Cmd+Tab to activate AX-based window switcher")
+        print("⌨️  Press Cmd+Tab to activate MRU window switcher")
         print("🔍 Using Accessibility API for comprehensive window detection")
+        print("🏠 App visible in dock - use Cmd+Q or dock menu to quit")
     }
     
     private func handleGlobalEvent(_ event: NSEvent) {
@@ -971,6 +972,12 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
         setNativeCommandTabEnabled(true)
         print("✅ Native Cmd+Tab re-enabled")
     }
+    
+    // Prevent opening unnecessary windows when app is clicked in dock
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // Don't open any windows when clicked in dock - we're a background utility
+        return false
+    }
 }
 
 // MARK: - Signal Handlers
@@ -990,5 +997,23 @@ let app = NSApplication.shared
 let delegate = SimpleWindowSwitcher()
 app.delegate = delegate
 
-app.setActivationPolicy(.accessory)
+// Change to .regular so app appears in dock and Force Quit menu
+app.setActivationPolicy(.regular)
+
+// Create a simple menu bar with Quit option
+let menuBar = NSMenu()
+let appMenuItem = NSMenuItem()
+menuBar.addItem(appMenuItem)
+
+let appMenu = NSMenu()
+let quitMenuItem = NSMenuItem(
+    title: "Quit SimpleWindowSwitcher",
+    action: #selector(NSApplication.terminate(_:)),
+    keyEquivalent: "q"
+)
+appMenu.addItem(quitMenuItem)
+appMenuItem.submenu = appMenu
+
+app.mainMenu = menuBar
+
 app.run() 
