@@ -36,6 +36,10 @@ class PerformanceCache {
     private var excludedAppsCache: [String: Bool] = [:]
     private var iconCache: [pid_t: NSImage] = [:]
     
+    // MRU (Most Recently Used) tracking
+    private var windowActivationHistory: [String] = [] // Stores window identifiers in MRU order
+    private let maxHistorySize = 50 // Keep last 50 window activations
+    
     private init() {}
     
     func getCachedRunningApps() -> [NSRunningApplication] {
@@ -93,11 +97,36 @@ class PerformanceCache {
         return excludedApps.contains { appName.contains($0) }
     }
     
+    // MRU tracking methods
+    func recordWindowActivation(_ windowInfo: WindowInfo) {
+        let windowKey = "\(windowInfo.ownerPID):\(windowInfo.id):\(windowInfo.title)"
+        
+        // Remove if already exists (to move to front)
+        windowActivationHistory.removeAll { $0 == windowKey }
+        
+        // Add to front (most recent)
+        windowActivationHistory.insert(windowKey, at: 0)
+        
+        // Trim history to max size
+        if windowActivationHistory.count > maxHistorySize {
+            windowActivationHistory = Array(windowActivationHistory.prefix(maxHistorySize))
+        }
+    }
+    
+    func getMRUOrder(for windowInfo: WindowInfo) -> Int {
+        let windowKey = "\(windowInfo.ownerPID):\(windowInfo.id):\(windowInfo.title)"
+        if let index = windowActivationHistory.firstIndex(of: windowKey) {
+            return index // Lower index = more recent
+        }
+        return Int.max // Never used = lowest priority
+    }
+    
     func clearCaches() {
         cachedRunningApps.removeAll()
         excludedAppsCache.removeAll()
         iconCache.removeAll()
         appCacheTime = 0
+        // Don't clear MRU history - we want to preserve it across cache clears
     }
 }
 
@@ -187,15 +216,33 @@ class WindowManager {
         let elapsedTime = Date().timeIntervalSince(startTime)
         print("⏱️ Window discovery took \(String(format: "%.3f", elapsedTime))s")
         
-        // Sort windows: non-active windows first, then active window
+        // Sort windows: non-active windows first (with MRU ordering), then active window
         return windows.sorted { window1, window2 in
             if window1.isActive != window2.isActive {
                 return !window1.isActive // Non-active windows first
             }
-            if window1.ownerName != window2.ownerName {
-                return window1.ownerName < window2.ownerName // Alphabetical by app
+            
+            // For non-active windows, use MRU ordering
+            if !window1.isActive && !window2.isActive {
+                let mru1 = PerformanceCache.shared.getMRUOrder(for: window1)
+                let mru2 = PerformanceCache.shared.getMRUOrder(for: window2)
+                
+                if mru1 != mru2 {
+                    return mru1 < mru2 // Lower MRU index = more recent = higher priority
+                }
+                
+                // If both have same MRU order (or no history), fall back to alphabetical
+                if window1.ownerName != window2.ownerName {
+                    return window1.ownerName < window2.ownerName
+                }
+                return window1.title < window2.title
             }
-            return window1.title < window2.title // Then by window title
+            
+            // For active windows (shouldn't happen since only one active), use alphabetical
+            if window1.ownerName != window2.ownerName {
+                return window1.ownerName < window2.ownerName
+            }
+            return window1.title < window2.title
         }
     }
     
@@ -366,6 +413,9 @@ class WindowManager {
             print("✗ Application is terminated: \(windowInfo.displayTitle)")
             return
         }
+        
+        // Record this window activation for MRU tracking
+        PerformanceCache.shared.recordWindowActivation(windowInfo)
         
         // First activate the application
         let appSuccess = app.activate(options: [.activateIgnoringOtherApps])
@@ -813,7 +863,7 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
             return
         }
         
-        print("📊 Found \(windows.count) windows in \(String(format: "%.3f", elapsedTime))s")
+        print("📊 Found \(windows.count) windows in \(String(format: "%.3f", elapsedTime))s (MRU-ordered)")
         updateDisplay()
         overlayWindow?.show()
     }
