@@ -14,28 +14,36 @@ An advanced window switcher for macOS that provides both global and app-specific
 - **🚀 Fast**: Optimized window discovery with caching and concurrent processing
 - **🔒 Smart Permissions**: Automatic permission detection with persistent setup (grant once, works forever)
 
-## Installation
+## Installation & Usage
 
-**Easy one-command install:**
+### Quick Start (Recommended)
 
 ```bash
 git clone <this-repo>
 cd SimpleWindowSwitcher
-./install.sh
+./run.sh
 ```
 
-That's it! The script will:
-1. Build the app from source
-2. Install it to `/Applications/`  
-3. Launch it automatically
-4. **Automatically handle accessibility permissions** - just grant them once and you're done!
+### Setting Up Accessibility Permissions
 
-### First-Time Setup
-- When you first run the app, it will request accessibility permissions
-- Click "Open System Preferences & Continue" 
-- Enable SimpleWindowSwitcher in Privacy & Security → Accessibility
-- **No restart needed!** The app automatically detects permissions and starts working
-- **Permissions persist** across app restarts - grant once, use forever!
+1. When you first run `./run.sh`, it will build and start the app
+2. **Grant accessibility permissions** when prompted:
+   - Open **System Preferences > Privacy & Security > Accessibility**
+   - Click the **"+" button** 
+   - Navigate to your SimpleWindowSwitcher project folder
+   - Select **`.build/release/SimpleWindowSwitcher`** (the built binary)
+   - **OR** copy this full path: `/path/to/your/SimpleWindowSwitcher/.build/release/SimpleWindowSwitcher`
+   - **Enable the checkbox** next to SimpleWindowSwitcher
+3. Return to the terminal - the app should now work immediately!
+
+### Managing the App
+
+- **To stop**: Press `Ctrl+C` in the terminal or close the terminal session
+- **To restart**: Run `./run.sh` again
+- **To force quit**: `pkill -f SimpleWindowSwitcher`
+- **Permissions**: Only need to grant once - they persist for the build location
+
+> 💡 **Why use ./run.sh instead of installing?** The development binary maintains accessibility permissions more reliably and provides debug output for troubleshooting.
 
 ## Usage
 

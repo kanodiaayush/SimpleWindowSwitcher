@@ -10,23 +10,28 @@ echo ""
 
 APP_BUNDLE="/Applications/SimpleWindowSwitcher.app"
 
-# Build the working version (release mode for better performance)
-echo "📦 Building release version..."
-swift build -c release
-
-if [ $? -ne 0 ]; then
-    echo "❌ Build failed!"
-    exit 1
-fi
-
+# Use existing working binary to preserve permissions
 EXECUTABLE=".build/release/SimpleWindowSwitcher"
 
-if [ ! -f "$EXECUTABLE" ]; then
-    echo "❌ Executable not found at $EXECUTABLE"
-    exit 1
+if [ -f "$EXECUTABLE" ]; then
+    echo "📦 Using existing working binary (preserves permissions)..."
+    echo "✅ Found working version"
+else
+    echo "📦 Building release version..."
+    swift build -c release
+    
+    if [ $? -ne 0 ]; then
+        echo "❌ Build failed!"
+        exit 1
+    fi
+    
+    if [ ! -f "$EXECUTABLE" ]; then
+        echo "❌ Executable not found at $EXECUTABLE"
+        exit 1
+    fi
+    
+    echo "✅ Built working version successfully"
 fi
-
-echo "✅ Built working version successfully"
 
 # Create app bundle (preserve existing if it exists to keep permissions)
 echo "📁 Ensuring app bundle exists at $APP_BUNDLE..."
