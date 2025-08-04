@@ -31,8 +31,8 @@ cd SimpleWindowSwitcher
    - Open **System Preferences > Privacy & Security > Accessibility**
    - Click the **"+" button** 
    - Navigate to your SimpleWindowSwitcher project folder
-   - Select **`.build/release/SimpleWindowSwitcher`** (the built binary)
-   - **OR** copy this full path: `/path/to/your/SimpleWindowSwitcher/.build/release/SimpleWindowSwitcher`
+   - Select **`build/release/SimpleWindowSwitcher`** (the built binary)
+   - **OR** copy this full path: `/path/to/your/SimpleWindowSwitcher/build/release/SimpleWindowSwitcher`
    - **Enable the checkbox** next to SimpleWindowSwitcher
 3. Return to the terminal - the app should now work immediately!
 
@@ -87,7 +87,7 @@ cd SimpleWindowSwitcher
 ./run.sh
 
 # Build only
-swift build -c release
+swift build -c release --build-path build
 ```
 
 ## Size Comparison
