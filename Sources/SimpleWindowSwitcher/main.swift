@@ -14,6 +14,10 @@ enum CGSSymbolicHotKey: Int, CaseIterable {
 @_silgen_name("CGSSetSymbolicHotKeyEnabled") @discardableResult
 func CGSSetSymbolicHotKeyEnabled(_ hotKey: CGSSymbolicHotKey.RawValue, _ isEnabled: Bool) -> Int32
 
+// External function for brute force window discovery (from alt-tab-macos)
+@_silgen_name("_AXUIElementCreateWithRemoteToken")
+func _AXUIElementCreateWithRemoteToken(_ data: CFData) -> Unmanaged<AXUIElement>?
+
 func setNativeCommandTabEnabled(_ isEnabled: Bool, _ hotkeys: [CGSSymbolicHotKey] = CGSSymbolicHotKey.allCases) {
     for hotkey in hotkeys {
         CGSSetSymbolicHotKeyEnabled(hotkey.rawValue, isEnabled)
@@ -30,6 +34,7 @@ struct WindowInfo {
     let bounds: CGRect
     let icon: NSImage?
     let isActive: Bool
+    let axElement: AXUIElement?  // Store AX element for proper switching
     
     var displayTitle: String {
         if title.isEmpty {
@@ -39,70 +44,206 @@ struct WindowInfo {
     }
 }
 
-// MARK: - Window Manager
+// MARK: - AX Window Manager (like alt-tab-macos)
 
 class WindowManager {
     static func getAllWindows() -> [WindowInfo] {
-        guard let windowList = CGWindowListCopyWindowInfo([.excludeDesktopElements, .optionOnScreenOnly], kCGNullWindowID) as? [[CFString: Any]] else {
-            return []
-        }
-        
         var windows: [WindowInfo] = []
-        // Get currently active window ID for sorting
         let activeWindowID = getCurrentActiveWindowID()
         
-        for windowDict in windowList {
-            guard let windowID = windowDict[kCGWindowNumber] as? CGWindowID,
-                  let ownerPID = windowDict[kCGWindowOwnerPID] as? pid_t,
-                  let ownerName = windowDict[kCGWindowOwnerName] as? String,
-                  let boundsDict = windowDict[kCGWindowBounds] as? [String: Any],
-                  let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else {
+        // Get all running applications with regular activation policy
+        let runningApps = NSWorkspace.shared.runningApplications.filter { app in
+            app.activationPolicy == .regular && !app.isTerminated
+        }
+        
+        for app in runningApps {
+            guard let appName = app.localizedName else { continue }
+            
+            // Skip excluded apps
+            if shouldExcludeApp(appName) {
                 continue
             }
             
-            let title = windowDict[kCGWindowName] as? String ?? ""
-            
-            // More permissive window filtering
-            if bounds.width > 20 && bounds.height > 20 && 
-               !ownerName.contains("Window Server") && 
-               ownerName != "Dock" &&
-               ownerName != "SystemUIServer" &&
-               ownerName != "ControlCenter" &&
-               ownerName != "NotificationCenter" &&
-               ownerName != "SimpleWindowSwitcher" {
-                
-                // Get app icon
-                let app = NSRunningApplication(processIdentifier: ownerPID)
-                let icon = app?.icon
-                
-                // Check if this is the active window
-                let isActive = windowID == activeWindowID
-                
-                let windowInfo = WindowInfo(
-                    id: windowID,
-                    title: title,
-                    ownerName: ownerName,
-                    ownerPID: ownerPID,
-                    bounds: bounds,
-                    icon: icon,
-                    isActive: isActive
-                )
-                windows.append(windowInfo)
-            }
+            let appWindows = getWindowsForApp(app)
+            windows.append(contentsOf: appWindows)
         }
         
         // Sort windows: non-active windows first, then active window
-        // This way the active window doesn't appear first in the switcher
         return windows.sorted { window1, window2 in
             if window1.isActive != window2.isActive {
                 return !window1.isActive // Non-active windows first
             }
-            return window1.ownerName < window2.ownerName // Alphabetical for same active state
+            if window1.ownerName != window2.ownerName {
+                return window1.ownerName < window2.ownerName // Alphabetical by app
+            }
+            return window1.title < window2.title // Then by window title
         }
     }
     
+    private static func getWindowsForApp(_ app: NSRunningApplication) -> [WindowInfo] {
+        var windows: [WindowInfo] = []
+        let activeWindowID = getCurrentActiveWindowID()
+        
+        let appRef = AXUIElementCreateApplication(app.processIdentifier)
+        
+        do {
+            // Get windows using AX API (like alt-tab-macos)
+            let axWindows = try getAXWindows(appRef, app.processIdentifier)
+            
+            for axWindow in axWindows {
+                if let windowInfo = createWindowInfo(
+                    from: axWindow,
+                    app: app,
+                    activeWindowID: activeWindowID
+                ) {
+                    windows.append(windowInfo)
+                }
+            }
+        } catch {
+            // Silent error handling
+        }
+        
+        return windows
+    }
+    
+    private static func getAXWindows(_ appRef: AXUIElement, _ pid: pid_t) throws -> [AXUIElement] {
+        // First try the normal AX approach
+        var windowsRef: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute as CFString, &windowsRef)
+        
+        var axWindows: [AXUIElement] = []
+        
+        if result == .success, let windows = windowsRef as? [AXUIElement] {
+            axWindows.append(contentsOf: windows)
+        }
+        
+        // Also try brute force approach (like alt-tab-macos)
+        let bruteForceWindows = getWindowsByBruteForce(pid)
+        axWindows.append(contentsOf: bruteForceWindows)
+        
+        // Remove duplicates
+        axWindows = Array(Set(axWindows))
+        
+        // Filter for actual windows
+        let filteredWindows = axWindows.filter { axWindow in
+            var subroleRef: CFTypeRef?
+            let subroleResult = AXUIElementCopyAttributeValue(axWindow, kAXSubroleAttribute as CFString, &subroleRef)
+            
+            if subroleResult == .success, let subrole = subroleRef as? String {
+                return subrole == kAXStandardWindowSubrole || subrole == kAXDialogSubrole
+            }
+            
+            // If no subrole, check if it has a title (likely a window)
+            var titleRef: CFTypeRef?
+            let titleResult = AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleRef)
+            return titleResult == .success
+        }
+        
+        return filteredWindows
+    }
+    
+    private static func getWindowsByBruteForce(_ pid: pid_t) -> [AXUIElement] {
+        var axWindows: [AXUIElement] = []
+        
+        // Create remote token for brute force (like alt-tab-macos)
+        var remoteToken = Data(count: 20)
+        remoteToken.replaceSubrange(0..<4, with: withUnsafeBytes(of: pid) { Data($0) })
+        remoteToken.replaceSubrange(4..<8, with: withUnsafeBytes(of: Int32(0)) { Data($0) })
+        remoteToken.replaceSubrange(8..<12, with: withUnsafeBytes(of: Int32(0x636f636f)) { Data($0) })
+        
+        // Iterate through possible element IDs
+        for axUiElementId: UInt64 in 0..<500 { // Reduced from 1000 for performance
+            remoteToken.replaceSubrange(12..<20, with: withUnsafeBytes(of: axUiElementId) { Data($0) })
+            
+            if let axUiElement = _AXUIElementCreateWithRemoteToken(remoteToken as CFData)?.takeRetainedValue() {
+                var subroleRef: CFTypeRef?
+                let result = AXUIElementCopyAttributeValue(axUiElement, kAXSubroleAttribute as CFString, &subroleRef)
+                
+                if result == .success,
+                   let subrole = subroleRef as? String,
+                   (subrole == kAXStandardWindowSubrole || subrole == kAXDialogSubrole) {
+                    axWindows.append(axUiElement)
+                }
+            }
+        }
+        
+        return axWindows
+    }
+    
+    private static func createWindowInfo(
+        from axWindow: AXUIElement,
+        app: NSRunningApplication,
+        activeWindowID: CGWindowID?
+    ) -> WindowInfo? {
+        // Get window title
+        var titleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleRef)
+        let title = (titleRef as? String) ?? ""
+        
+        // Get window size and position
+        var sizeRef: CFTypeRef?
+        var positionRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(axWindow, kAXSizeAttribute as CFString, &sizeRef)
+        AXUIElementCopyAttributeValue(axWindow, kAXPositionAttribute as CFString, &positionRef)
+        
+        let size = sizeRef as? CGSize ?? CGSize.zero
+        let position = positionRef as? CGPoint ?? CGPoint.zero
+        let bounds = CGRect(origin: position, size: size)
+        
+        // Accept windows with meaningful titles or valid sizes
+        let hasValidSize = size.width > 50 && size.height > 30
+        let hasMeaningfulTitle = !title.isEmpty && title != "Window" && title != "Untitled"
+        
+        // Accept windows if they have either valid size OR meaningful title
+        guard hasValidSize || hasMeaningfulTitle else {
+            return nil
+        }
+        
+        // Try to get CGWindowID - this is important for window switching
+        var windowIDRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(axWindow, kAXIdentifierAttribute as CFString, &windowIDRef)
+        let windowID = windowIDRef as? CGWindowID ?? 0
+        
+        let isActive = windowID == activeWindowID
+        
+        // If AX size is zero but we have a meaningful window, use a default size
+        let finalBounds = hasValidSize ? bounds : CGRect(x: position.x, y: position.y, width: 800, height: 600)
+        
+        let windowInfo = WindowInfo(
+            id: windowID,
+            title: title,
+            ownerName: app.localizedName ?? "Unknown",
+            ownerPID: app.processIdentifier,
+            bounds: finalBounds,
+            icon: app.icon,
+            isActive: isActive,
+            axElement: axWindow  // Store AX element for proper window switching
+        )
+        
+        return windowInfo
+    }
+    
+    private static func shouldExcludeApp(_ appName: String) -> Bool {
+        let excludedApps = [
+            "Window Server", "WindowServer",
+            "Dock", "SystemUIServer", "ControlCenter", "NotificationCenter",
+            "TextInputMenuAgent", "TextInputSwitcher",
+            "Spotlight", "Siri", "VoiceOver",
+            "AXVisualSupportAgent", "UniversalAccessAuthWarn",
+            "WiFiAgent", "UserEventAgent", "CommCenter",
+            "ReportCrash", "CrashReporter", "Problem Reporter",
+            "loginwindow", "SecurityAgent", "ScreenSaverEngine",
+            "SimpleWindowSwitcher", // Our own app
+            "Steam Helper", // Steam background processes
+            "CleanMyMac", "CleanMyMac X Business", // System cleaners
+            "Raycast", "Alfred", // Other launchers that might interfere
+        ]
+        
+        return excludedApps.contains { appName.contains($0) }
+    }
+    
     static func getCurrentActiveWindowID() -> CGWindowID? {
-        // Get the currently focused window ID
+        // Get the currently focused window ID using CG API
         if let windowList = CGWindowListCopyWindowInfo([.excludeDesktopElements, .optionOnScreenOnly], kCGNullWindowID) as? [[CFString: Any]] {
             for windowDict in windowList {
                 if let windowID = windowDict[kCGWindowNumber] as? CGWindowID,
@@ -128,8 +269,20 @@ class WindowManager {
             return
         }
         
-        let success = app.activate(options: [.activateIgnoringOtherApps])
-        print("✓ Activation result: \(success)")
+        // First activate the application
+        let appSuccess = app.activate(options: [.activateIgnoringOtherApps])
+        
+        // Then focus the specific window using AX API
+        if let axElement = windowInfo.axElement {
+            let focusResult = AXUIElementPerformAction(axElement, kAXRaiseAction as CFString)
+            if focusResult == .success {
+                // Also try to make it the main window
+                AXUIElementPerformAction(axElement, kAXPressAction as CFString)
+            }
+            print("✓ App activation: \(appSuccess), Window focus: \(focusResult == .success)")
+        } else {
+            print("✓ App activation: \(appSuccess) (no AX element for window focus)")
+        }
     }
 }
 
@@ -138,9 +291,16 @@ class WindowManager {
 class NativeStyleOverlay: NSWindow {
     private var windows: [WindowInfo] = []
     private var selectedIndex = 0
+    private var scrollOffset = 0
+    private let iconsPerRow = 8
+    private let maxRows = 4
+    private var maxVisibleIcons: Int { return iconsPerRow * maxRows }
     private var iconViews: [NSView] = []
+    private var previewViews: [NSImageView] = []
     private let iconContainer = NSView()
     private let titleLabel = NSTextField()
+    private let previewContainer = NSView()
+    private let scrollIndicator = NSTextField()
     
     override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing backingStoreType: NSWindow.BackingStoreType, defer flag: Bool) {
         super.init(contentRect: NSRect(x: 0, y: 0, width: 600, height: 150), 
@@ -157,11 +317,15 @@ class NativeStyleOverlay: NSWindow {
         isOpaque = false
         hasShadow = true
         
+        // Will be resized dynamically
+        let initialFrame = NSRect(x: 0, y: 0, width: 900, height: 450)
+        setFrame(initialFrame, display: false)
+        
         // Center on screen
         if let screen = NSScreen.main {
             let screenFrame = screen.visibleFrame
-            let x = screenFrame.midX - 300
-            let y = screenFrame.midY - 75
+            let x = screenFrame.midX - 450
+            let y = screenFrame.midY - 225
             setFrameOrigin(NSPoint(x: x, y: y))
         }
         
@@ -170,25 +334,41 @@ class NativeStyleOverlay: NSWindow {
         backgroundView.material = .hudWindow
         backgroundView.blendingMode = .behindWindow
         backgroundView.state = .active
-        backgroundView.frame = NSRect(x: 0, y: 0, width: 600, height: 150)
+        backgroundView.frame = NSRect(x: 0, y: 0, width: 900, height: 450)
         backgroundView.autoresizingMask = [.width, .height]
         backgroundView.wantsLayer = true
         backgroundView.layer?.cornerRadius = 12
         
-        // Setup icon container
-        iconContainer.frame = NSRect(x: 20, y: 50, width: 560, height: 80)
+        // Setup icon container for grid layout (4 rows x 8 cols of ~70px icons)
+        iconContainer.frame = NSRect(x: 20, y: 150, width: 860, height: 280)
         
-        // Setup title label
+        // Setup title label  
         titleLabel.isEditable = false
         titleLabel.isBordered = false
         titleLabel.backgroundColor = .clear
         titleLabel.textColor = .white
         titleLabel.font = NSFont.systemFont(ofSize: 16, weight: .medium)
         titleLabel.alignment = .center
-        titleLabel.frame = NSRect(x: 20, y: 20, width: 560, height: 25)
+        titleLabel.frame = NSRect(x: 20, y: 110, width: 860, height: 25)
+        
+        // Setup scroll indicator
+        scrollIndicator.isEditable = false
+        scrollIndicator.isBordered = false
+        scrollIndicator.backgroundColor = .clear
+        scrollIndicator.textColor = .lightGray
+        scrollIndicator.font = NSFont.systemFont(ofSize: 12)
+        scrollIndicator.alignment = .center
+        scrollIndicator.frame = NSRect(x: 20, y: 20, width: 860, height: 20)
+        scrollIndicator.stringValue = ""
+        
+        // Setup preview container (smaller, positioned at bottom)
+        previewContainer.frame = NSRect(x: 20, y: 50, width: 860, height: 50)
+        previewContainer.wantsLayer = true
         
         backgroundView.addSubview(iconContainer)
         backgroundView.addSubview(titleLabel)
+        backgroundView.addSubview(scrollIndicator)
+        backgroundView.addSubview(previewContainer)
         contentView?.addSubview(backgroundView)
     }
     
@@ -196,24 +376,70 @@ class NativeStyleOverlay: NSWindow {
         self.windows = windowList
         self.selectedIndex = selectedIndex
         
-        // Clear existing icons
+        // Update scroll offset if selection is outside visible range
+        updateScrollOffset()
+        
+        // Clear existing views
         iconViews.forEach { $0.removeFromSuperview() }
         iconViews.removeAll()
+        previewViews.forEach { $0.removeFromSuperview() }
+        previewViews.removeAll()
         
-        let maxIcons = min(windows.count, 8) // Limit for visual clarity
         let iconSize: CGFloat = 70
         let spacing: CGFloat = 15
-        let totalWidth = CGFloat(maxIcons) * iconSize + CGFloat(max(0, maxIcons - 1)) * spacing
-        let startX = (iconContainer.bounds.width - totalWidth) / 2
         
-        for i in 0..<maxIcons {
+        // Calculate required space for grid
+        let totalWidth = CGFloat(iconsPerRow) * iconSize + CGFloat(max(0, iconsPerRow - 1)) * spacing
+        let totalHeight = CGFloat(maxRows) * iconSize + CGFloat(max(0, maxRows - 1)) * spacing
+        
+        // Calculate dynamic window size based on actual content
+        let visibleWindowCount = min(windows.count, maxVisibleIcons)
+        let actualRows = min(maxRows, (visibleWindowCount + iconsPerRow - 1) / iconsPerRow)
+        
+        let windowWidth: CGFloat = max(900, totalWidth + 80)  // minimum width
+        let windowHeight: CGFloat = max(350, CGFloat(actualRows) * (iconSize + spacing) + 200) // dynamic height
+        
+        // Update window size and position
+        let screenFrame = NSScreen.main?.visibleFrame ?? NSRect.zero
+        let newFrame = NSRect(
+            x: screenFrame.midX - windowWidth / 2,
+            y: screenFrame.midY - windowHeight / 2,
+            width: windowWidth,
+            height: windowHeight
+        )
+        setFrame(newFrame, display: true)
+        
+        // Update background view and containers
+        if let backgroundView = contentView?.subviews.first {
+            backgroundView.frame = NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight)
+            let gridHeight = CGFloat(actualRows) * (iconSize + spacing)
+            iconContainer.frame = NSRect(x: 20, y: windowHeight - gridHeight - 60, width: windowWidth - 40, height: gridHeight)
+            titleLabel.frame = NSRect(x: 20, y: windowHeight - gridHeight - 100, width: windowWidth - 40, height: 25)
+            previewContainer.frame = NSRect(x: 20, y: 50, width: windowWidth - 40, height: 50)
+            scrollIndicator.frame = NSRect(x: 20, y: 20, width: windowWidth - 40, height: 20)
+        }
+        
+        // Calculate start position for centering grid
+        let startX = (iconContainer.bounds.width - totalWidth) / 2
+        let startY = iconContainer.bounds.height - iconSize // Start from top
+        
+        // Draw visible windows in grid
+        let startIndex = scrollOffset
+        let endIndex = min(startIndex + maxVisibleIcons, windows.count)
+        
+        for i in startIndex..<endIndex {
+            let displayIndex = i - startIndex
             let window = windows[i]
+            
+            // Calculate grid position
+            let row = displayIndex / iconsPerRow
+            let col = displayIndex % iconsPerRow
             
             // Create icon container
             let container = NSView()
             container.frame = NSRect(
-                x: startX + CGFloat(i) * (iconSize + spacing),
-                y: 5,
+                x: startX + CGFloat(col) * (iconSize + spacing),
+                y: startY - CGFloat(row) * (iconSize + spacing),
                 width: iconSize,
                 height: iconSize
             )
@@ -228,7 +454,6 @@ class NativeStyleOverlay: NSWindow {
             if let icon = window.icon {
                 imageView.image = icon
             } else {
-                // Create default app icon
                 imageView.image = NSImage(named: NSImage.applicationIconName)
             }
             
@@ -241,12 +466,13 @@ class NativeStyleOverlay: NSWindow {
                 container.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.3).cgColor
                 container.layer?.borderWidth = 3
                 container.layer?.borderColor = NSColor.controlAccentColor.cgColor
-                
-                // Add subtle glow effect
                 container.layer?.shadowColor = NSColor.controlAccentColor.cgColor
                 container.layer?.shadowOffset = CGSize.zero
                 container.layer?.shadowRadius = 10
                 container.layer?.shadowOpacity = 0.5
+                
+                // Add window preview for selected item
+                addWindowPreview(for: window)
             } else {
                 container.layer?.backgroundColor = NSColor.clear.cgColor
                 container.layer?.borderWidth = 0
@@ -260,25 +486,81 @@ class NativeStyleOverlay: NSWindow {
             titleLabel.stringValue = selectedWindow.displayTitle
         }
         
-        // Adjust window width based on content
-        let newWidth = max(400, totalWidth + 40)
-        let screenFrame = NSScreen.main?.visibleFrame ?? NSRect.zero
-        let newFrame = NSRect(
-            x: screenFrame.midX - newWidth / 2,
-            y: screenFrame.midY - 75,
-            width: newWidth,
-            height: 150
-        )
-        setFrame(newFrame, display: true)
-        
-        // Update background view size
-        if let backgroundView = contentView?.subviews.first {
-            backgroundView.frame = NSRect(x: 0, y: 0, width: newWidth, height: 150)
+        // Update scroll indicator
+        updateScrollIndicator()
+    }
+    
+    private func updateScrollOffset() {
+        // Ensure selected index is visible
+        if selectedIndex < scrollOffset {
+            scrollOffset = selectedIndex
+        } else if selectedIndex >= scrollOffset + maxVisibleIcons {
+            scrollOffset = selectedIndex - maxVisibleIcons + 1
         }
         
-        // Update container positions
-        iconContainer.frame = NSRect(x: 20, y: 50, width: newWidth - 40, height: 80)
-        titleLabel.frame = NSRect(x: 20, y: 20, width: newWidth - 40, height: 25)
+        // Clamp scroll offset
+        scrollOffset = max(0, min(scrollOffset, max(0, windows.count - maxVisibleIcons)))
+    }
+    
+    private func updateScrollIndicator() {
+        if windows.count <= maxVisibleIcons {
+            scrollIndicator.stringValue = ""
+        } else {
+            let currentPage = (scrollOffset / maxVisibleIcons) + 1
+            let totalPages = (windows.count + maxVisibleIcons - 1) / maxVisibleIcons
+            scrollIndicator.stringValue = "Page \(currentPage) of \(totalPages) • Use ← → to scroll"
+        }
+    }
+    
+    private func addWindowPreview(for window: WindowInfo) {
+        // Create window preview
+        let previewView = NSImageView()
+        let previewWidth: CGFloat = 200
+        let previewHeight: CGFloat = 40
+        
+        // Center preview in preview container
+        previewView.frame = NSRect(
+            x: (previewContainer.bounds.width - previewWidth) / 2,
+            y: (previewContainer.bounds.height - previewHeight) / 2,
+            width: previewWidth,
+            height: previewHeight
+        )
+        
+        previewView.wantsLayer = true
+        previewView.layer?.cornerRadius = 6
+        previewView.layer?.borderWidth = 2
+        previewView.layer?.borderColor = NSColor.controlAccentColor.cgColor
+        previewView.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.9).cgColor
+        
+        // Try to get window content
+        if let cgImage = getCGImageForWindow(window) {
+            let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+            previewView.image = nsImage
+            previewView.imageScaling = .scaleProportionallyDown
+        } else {
+            // Fallback: show app icon in preview
+            if let icon = window.icon {
+                previewView.image = icon
+                previewView.imageScaling = .scaleProportionallyDown
+            }
+        }
+        
+        previewContainer.addSubview(previewView)
+        previewViews.append(previewView)
+    }
+    
+    private func getCGImageForWindow(_ window: WindowInfo) -> CGImage? {
+        let windowID = window.id
+        
+        let windowIDNumber = NSNumber(value: windowID)
+        let imageRef = CGWindowListCreateImage(
+            CGRect.null,
+            .optionIncludingWindow,
+            CGWindowID(windowID),
+            [.boundsIgnoreFraming, .bestResolution]
+        )
+        
+        return imageRef
     }
     
     func show() {
@@ -287,6 +569,10 @@ class NativeStyleOverlay: NSWindow {
     
     func hide() {
         orderOut(nil)
+    }
+    
+    var visibleIconsCount: Int {
+        return iconsPerRow * maxRows
     }
 }
 
@@ -331,8 +617,8 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
             self?.handleGlobalEvent(event)
         }
         
-        print("⌨️  Press Cmd+Tab to activate native-style window switcher")
-        print("✨ Native macOS interface with app icons")
+        print("⌨️  Press Cmd+Tab to activate AX-based window switcher")
+        print("🔍 Using Accessibility API for comprehensive window detection")
     }
     
     private func handleGlobalEvent(_ event: NSEvent) {
@@ -340,11 +626,31 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
             let keyCode = event.keyCode
             let modifiers = event.modifierFlags
             
-            // Check for Cmd+Tab
-            if keyCode == 48 && modifiers.contains(.command) { // Tab key with Cmd
-                if isShowingSwitcher {
+            if isShowingSwitcher {
+                // Handle navigation when switcher is open
+                switch keyCode {
+                case 48: // Tab key with Cmd
+                    if modifiers.contains(.command) {
+                        if modifiers.contains(.shift) {
+                            selectPrevious()
+                        } else {
+                            selectNext()
+                        }
+                    }
+                case 123: // Left arrow
+                    selectPrevious()
+                case 124: // Right arrow
                     selectNext()
-                } else {
+                case 125: // Down arrow - page down
+                    scrollDown()
+                case 126: // Up arrow - page up
+                    scrollUp()
+                default:
+                    break
+                }
+            } else {
+                // Check for Cmd+Tab to start switcher
+                if keyCode == 48 && modifiers.contains(.command) { // Tab key with Cmd
                     showWindowSwitcher()
                 }
             }
@@ -362,7 +668,7 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
     
     private func showWindowSwitcher() {
         print("\n" + String(repeating: "=", count: 50))
-        print("✨ Starting native-style window switcher")
+        print("🔍 Starting AX-based window switcher")
         
         windows = WindowManager.getAllWindows()
         selectedIndex = 0
@@ -383,6 +689,28 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
     private func selectNext() {
         guard !windows.isEmpty else { return }
         selectedIndex = (selectedIndex + 1) % windows.count
+        updateDisplay()
+    }
+    
+    private func selectPrevious() {
+        guard !windows.isEmpty else { return }
+        selectedIndex = selectedIndex > 0 ? selectedIndex - 1 : windows.count - 1
+        updateDisplay()
+    }
+    
+    private func scrollUp() {
+        guard !windows.isEmpty else { return }
+        // Jump up by visible page size
+        let maxVisibleIcons = overlayWindow?.visibleIconsCount ?? 10
+        selectedIndex = max(0, selectedIndex - maxVisibleIcons)
+        updateDisplay()
+    }
+    
+    private func scrollDown() {
+        guard !windows.isEmpty else { return }
+        // Jump down by visible page size
+        let maxVisibleIcons = overlayWindow?.visibleIconsCount ?? 10
+        selectedIndex = min(windows.count - 1, selectedIndex + maxVisibleIcons)
         updateDisplay()
     }
     
