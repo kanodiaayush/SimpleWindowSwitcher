@@ -22,35 +22,32 @@ if [ ! -f "$EXECUTABLE" ]; then
     exit 1
 fi
 
-# Create Applications directory if it doesn't exist
-INSTALL_DIR="$HOME/Applications"
-if [ ! -d "$INSTALL_DIR" ]; then
-    echo "📁 Creating $INSTALL_DIR..."
-    mkdir -p "$INSTALL_DIR"
-fi
+# Install to system Applications directory
+INSTALL_DIR="/Applications"
 
 # Create app bundle structure
 APP_BUNDLE="$INSTALL_DIR/SimpleWindowSwitcher.app"
 echo "📁 Creating app bundle at $APP_BUNDLE..."
 
-# Remove existing app if present
+# Remove existing app if present (may need sudo for /Applications)
 if [ -d "$APP_BUNDLE" ]; then
     echo "🗑️  Removing existing installation..."
-    rm -rf "$APP_BUNDLE"
+    sudo rm -rf "$APP_BUNDLE"
 fi
 
-# Create app bundle directories
-mkdir -p "$APP_BUNDLE/Contents/MacOS"
-mkdir -p "$APP_BUNDLE/Contents/Resources"
+# Create app bundle directories (may need sudo for /Applications)
+echo "📋 Installing to system Applications folder (may require password)..."
+sudo mkdir -p "$APP_BUNDLE/Contents/MacOS"
+sudo mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 # Copy executable
 echo "📋 Installing executable..."
-cp "$EXECUTABLE" "$APP_BUNDLE/Contents/MacOS/SimpleWindowSwitcher"
-chmod +x "$APP_BUNDLE/Contents/MacOS/SimpleWindowSwitcher"
+sudo cp "$EXECUTABLE" "$APP_BUNDLE/Contents/MacOS/SimpleWindowSwitcher"
+sudo chmod +x "$APP_BUNDLE/Contents/MacOS/SimpleWindowSwitcher"
 
 # Create Info.plist
 echo "📝 Creating Info.plist..."
-cat > "$APP_BUNDLE/Contents/Info.plist" << 'EOF'
+sudo tee "$APP_BUNDLE/Contents/Info.plist" > /dev/null << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
