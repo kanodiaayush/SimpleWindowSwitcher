@@ -682,6 +682,7 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
     private var cmdPressed = false
     private var overlayWindow: NativeStyleOverlay?
     private var globalMonitor: Any?
+    private var localMonitor: Any?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("🚀 SimpleWindowSwitcher started")
@@ -715,13 +716,36 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
         setNativeCommandTabEnabled(false)
         print("🚫 Native Cmd+Tab disabled")
         
-        // Simple global key monitoring
+        // Global key monitoring for events outside our app
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             self?.handleGlobalEvent(event)
         }
         
+        // Local key monitoring for events within our app (when switcher is active)
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
+            return self?.handleLocalEvent(event) ?? event
+        }
+        
         print("⌨️  Press Cmd+Tab to activate AX-based window switcher")
         print("🔍 Using Accessibility API for comprehensive window detection")
+    }
+    
+    private func handleLocalEvent(_ event: NSEvent) -> NSEvent? {
+        // When switcher is active, we capture and handle arrow keys locally
+        // Return nil to consume the event and prevent it from propagating
+        if isShowingSwitcher && event.type == .keyDown {
+            let keyCode = event.keyCode
+            
+            switch keyCode {
+            case 123, 124, 125, 126, 53: // Arrow keys and Escape
+                handleGlobalEvent(event)
+                return nil // Consume the event
+            default:
+                break
+            }
+        }
+        
+        return event // Let other events pass through
     }
     
     private func handleGlobalEvent(_ event: NSEvent) {
@@ -906,10 +930,14 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
     }
     
     func applicationWillTerminate(_ notification: Notification) {
-        // Clean up global monitor
+        // Clean up monitors
         if let monitor = globalMonitor {
             NSEvent.removeMonitor(monitor)
             globalMonitor = nil
+        }
+        if let monitor = localMonitor {
+            NSEvent.removeMonitor(monitor)
+            localMonitor = nil
         }
         
         // Hide overlay window
