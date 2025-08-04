@@ -55,7 +55,7 @@ sudo tee "$APP_BUNDLE/Contents/Info.plist" > /dev/null << 'EOF'
     <key>CFBundleExecutable</key>
     <string>SimpleWindowSwitcher</string>
     <key>CFBundleIdentifier</key>
-    <string>com.local.SimpleWindowSwitcher</string>
+    <string>com.local.SimpleWindowSwitcher.stable</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
@@ -77,6 +77,15 @@ sudo tee "$APP_BUNDLE/Contents/Info.plist" > /dev/null << 'EOF'
 </dict>
 </plist>
 EOF
+
+# Code sign the app to maintain consistent identity and preserve accessibility permissions
+echo "🔐 Code signing application..."
+if codesign --force --deep --sign - "$APP_BUNDLE" 2>/dev/null; then
+    echo "✅ App signed successfully - accessibility permissions should persist!"
+else
+    echo "⚠️  Code signing failed - accessibility permissions may reset on restart"
+    echo "   This is normal for development builds and won't affect functionality"
+fi
 
 echo ""
 echo "✅ SimpleWindowSwitcher installed successfully!"
