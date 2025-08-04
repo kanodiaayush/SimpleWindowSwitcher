@@ -667,6 +667,10 @@ class NativeStyleOverlay: NSWindow {
     var visibleIconsCount: Int {
         return iconsPerRow * maxRows
     }
+    
+    var iconsPerRowCount: Int {
+        return iconsPerRow
+    }
 }
 
 // MARK: - Enhanced Window Switcher
@@ -740,10 +744,10 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
                     selectPrevious()
                 case 124: // Right arrow
                     selectNext()
-                case 125: // Down arrow - page down
-                    scrollDown()
-                case 126: // Up arrow - page up
-                    scrollUp()
+                case 125: // Down arrow - move down one row
+                    selectDown()
+                case 126: // Up arrow - move up one row
+                    selectUp()
                 default:
                     break
                 }
@@ -800,6 +804,48 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
         updateDisplay()
     }
     
+    private func selectUp() {
+        guard !windows.isEmpty else { return }
+        guard let overlay = overlayWindow else { return }
+        
+        let iconsPerRow = overlay.iconsPerRowCount
+        let currentRow = selectedIndex / iconsPerRow
+        let currentCol = selectedIndex % iconsPerRow
+        
+        if currentRow > 0 {
+            // Move up one row in the same column
+            let newIndex = selectedIndex - iconsPerRow
+            selectedIndex = max(0, newIndex)
+        } else {
+            // If in top row, wrap to bottom row in same column
+            let totalRows = (windows.count + iconsPerRow - 1) / iconsPerRow
+            let lastRowIndex = (totalRows - 1) * iconsPerRow + currentCol
+            selectedIndex = min(lastRowIndex, windows.count - 1)
+        }
+        updateDisplay()
+    }
+    
+    private func selectDown() {
+        guard !windows.isEmpty else { return }
+        guard let overlay = overlayWindow else { return }
+        
+        let iconsPerRow = overlay.iconsPerRowCount
+        let currentRow = selectedIndex / iconsPerRow
+        let currentCol = selectedIndex % iconsPerRow
+        let totalRows = (windows.count + iconsPerRow - 1) / iconsPerRow
+        
+        if currentRow < totalRows - 1 {
+            // Move down one row in the same column
+            let newIndex = selectedIndex + iconsPerRow
+            selectedIndex = min(newIndex, windows.count - 1)
+        } else {
+            // If in bottom row, wrap to top row in same column
+            selectedIndex = currentCol
+        }
+        updateDisplay()
+    }
+    
+    // Keep the old scroll functions for potential future use (page navigation)
     private func scrollUp() {
         guard !windows.isEmpty else { return }
         // Jump up by visible page size
