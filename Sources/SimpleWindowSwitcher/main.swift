@@ -218,12 +218,12 @@ class WindowManager {
         
         // Sort windows by Most Recently Used (MRU) order
         return windows.sorted { window1, window2 in
-            // Active window always comes first (current window)
+            // Active window always comes first (current window at index 0)
             if window1.isActive != window2.isActive {
                 return window1.isActive // Active window first
             }
             
-            // For non-active windows, sort by MRU order
+            // For non-active windows, sort by MRU order (most recent first)
             if !window1.isActive && !window2.isActive {
                 let mru1 = PerformanceCache.shared.getMRUOrder(for: window1)
                 let mru2 = PerformanceCache.shared.getMRUOrder(for: window2)
@@ -832,7 +832,8 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
             PerformanceCache.shared.recordWindowActivation(activeWindow)
         }
         
-        selectedIndex = 0
+        // Start at index 1 (first non-active window) for traditional Alt+Tab behavior
+        selectedIndex = windows.count > 1 ? 1 : 0
         isShowingSwitcher = true
         cmdPressed = true
         
