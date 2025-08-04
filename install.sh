@@ -28,21 +28,29 @@ fi
 
 echo "✅ Built working version successfully"
 
-# Remove any existing installation
-if [ -d "$APP_BUNDLE" ]; then
-    echo "🗑️  Removing existing installation..."
-    sudo rm -rf "$APP_BUNDLE"
-fi
-
-# Create app bundle
-echo "📁 Creating app bundle at $APP_BUNDLE..."
+# Create app bundle (preserve existing if it exists to keep permissions)
+echo "📁 Ensuring app bundle exists at $APP_BUNDLE..."
 sudo mkdir -p "$APP_BUNDLE/Contents/MacOS"
 sudo mkdir -p "$APP_BUNDLE/Contents/Resources"
 
-# Copy the EXACT working executable
-echo "📋 Installing the working executable..."
+# Stop any running instance first
+if pgrep -f "SimpleWindowSwitcher" > /dev/null; then
+    echo "🛑 Stopping running SimpleWindowSwitcher..."
+    sudo pkill -f "SimpleWindowSwitcher" 2>/dev/null || true
+    sleep 1
+fi
+
+# Update the executable (don't delete the whole bundle)
+echo "📋 Updating executable..."
 sudo cp "$EXECUTABLE" "$APP_BUNDLE/Contents/MacOS/SimpleWindowSwitcher"
 sudo chmod +x "$APP_BUNDLE/Contents/MacOS/SimpleWindowSwitcher"
+
+# Try to preserve the bundle's creation date and identity
+if [ -f "$APP_BUNDLE/Contents/MacOS/SimpleWindowSwitcher" ]; then
+    echo "🔧 Preserving bundle identity..."
+    # Reset bundle cache
+    sudo /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -kill -r -domain local -domain system -domain user
+fi
 
 # Create minimal Info.plist (matching what works)
 echo "📝 Creating Info.plist..."
@@ -54,27 +62,23 @@ sudo tee "$APP_BUNDLE/Contents/Info.plist" > /dev/null << 'EOF'
     <key>CFBundleExecutable</key>
     <string>SimpleWindowSwitcher</string>
     <key>CFBundleIdentifier</key>
-    <string>com.akanodia.SimpleWindowSwitcher.working</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
+    <string>com.example.SimpleWindowSwitcher</string>
     <key>CFBundleName</key>
     <string>SimpleWindowSwitcher</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
     <key>CFBundleVersion</key>
     <string>1.0</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>10.15</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
     <key>LSUIElement</key>
-    <false/>
-    <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
-    <key>NSHighResolutionCapable</key>
     <true/>
+    <key>LSBackgroundOnly</key>
+    <false/>
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
+    <key>NSSupportsSuddenTermination</key>
+    <false/>
     <key>NSAccessibilityUsageDescription</key>
-    <string>SimpleWindowSwitcher needs accessibility access to enumerate and switch between windows from all applications.</string>
+    <string>This app needs accessibility access to switch between windows.</string>
 </dict>
 </plist>
 EOF
@@ -87,10 +91,13 @@ echo "✅ Working SimpleWindowSwitcher installed successfully!"
 echo ""
 echo "📍 Installation location: $APP_BUNDLE"
 echo ""
-echo "🎯 To test:"
+echo "🎯 Usage (IMPORTANT for first install):"
 echo "   1. Launch: open '$APP_BUNDLE'"
-echo "   2. Grant accessibility permissions if prompted"
-echo "   3. Test with Cmd+Tab - should work exactly like ./run.sh!"
+echo "   2. If prompted: Enable permissions in System Preferences"
+echo "   3. QUIT the app (Cmd+Q) and relaunch from Applications"
+echo "   4. Use Cmd+Tab (all windows) and Cmd+\` (current app windows)"
+echo ""
+echo "⚠️  Note: macOS requires manual restart after granting permissions"
 echo ""
 echo "💡 This uses the EXACT same binary that works in development."
 echo ""

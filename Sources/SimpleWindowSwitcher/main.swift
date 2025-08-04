@@ -742,48 +742,10 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("🚀 SimpleWindowSwitcher started")
         
-        // Check for accessibility permissions
-        if !AXIsProcessTrusted() {
-            let alert = NSAlert()
-            alert.messageText = "Accessibility Permission Required"
-            alert.informativeText = "This app needs accessibility permissions to switch windows. Please grant permission in System Preferences > Security & Privacy > Privacy > Accessibility."
-            alert.runModal()
-            
-            let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
-            NSWorkspace.shared.open(url)
+        // Check for accessibility permissions using alt-tab-macos approach
+        ensurePermissionsAreGranted {
+            self.continueAppStartup()
         }
-        
-        // Create overlay window once at startup
-        overlayWindow = NativeStyleOverlay(
-            contentRect: NSRect.zero,
-            styleMask: .borderless,
-            backing: .buffered,
-            defer: false
-        )
-        
-        // Warm up performance cache in background
-        DispatchQueue.global(qos: .background).async {
-            _ = PerformanceCache.shared.getCachedRunningApps()
-            print("📦 Performance cache warmed up")
-        }
-        
-        // Disable native Cmd+Tab
-        setNativeCommandTabEnabled(false)
-        print("🚫 Native Cmd+Tab disabled")
-        
-        // Global key monitoring for events outside our app
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
-            self?.handleGlobalEvent(event)
-        }
-        
-        // Local key monitoring for events within our app (when switcher is active)
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
-            return self?.handleLocalEvent(event) ?? event
-        }
-        
-        print("⌨️  Press Cmd+Tab to activate AX-based window switcher")
-        print("⌨️  Press Cmd+` to cycle through current app windows")
-        print("🔍 Using Accessibility API for comprehensive window detection")
     }
     
     private func handleLocalEvent(_ event: NSEvent) -> NSEvent? {
@@ -1107,6 +1069,141 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
         cmdPressed = false
         currentAppWindows.removeAll()
         currentAppIndex = 0
+    }
+    
+    // MARK: - Permission Handling (adapted from alt-tab-macos)
+    
+    private var permissionCheckTimer: Timer?
+    private var preStartupPermissionsPassed = false
+    
+    private func ensurePermissionsAreGranted(_ continueAppStartup: @escaping () -> Void) {
+        let hasPermissions = AXIsProcessTrusted()
+        print("🔍 Checking accessibility permissions: \(hasPermissions)")
+        
+        if hasPermissions {
+            print("✅ Permissions already granted - continuing startup")
+            preStartupPermissionsPassed = true
+            continueAppStartup()
+        } else {
+            print("❌ Permissions not granted - showing permission dialog")
+            showPermissionAlert(continueAppStartup)
+        }
+    }
+    
+    private func showPermissionAlert(_ startupBlock: @escaping () -> Void) {
+        let alert = NSAlert()
+        alert.messageText = "Accessibility Permission Required"
+        alert.informativeText = """
+        SimpleWindowSwitcher needs accessibility permissions to switch windows.
+        
+        I'll open System Preferences for you. Please:
+        1. Find SimpleWindowSwitcher in Privacy & Security > Accessibility
+        2. Enable the checkbox next to SimpleWindowSwitcher
+        3. Come back here and wait - I'll detect it automatically!
+        
+        No restart needed - the app will continue once permissions are granted.
+        """
+        alert.addButton(withTitle: "Open System Preferences & Continue")
+        alert.addButton(withTitle: "Quit")
+        
+        let response = alert.runModal()
+        
+        if response == .alertFirstButtonReturn {
+            // Open System Preferences
+            let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+            NSWorkspace.shared.open(url)
+            
+            // Start polling for permissions (like alt-tab-macos does)
+            pollPermissionsToUpdatePermissionsWindow(startupBlock)
+        } else {
+            print("❌ User chose to quit without granting permissions")
+            NSApplication.shared.terminate(self)
+        }
+    }
+    
+    private func pollPermissionsToUpdatePermissionsWindow(_ startupBlock: @escaping () -> Void) {
+        print("🔄 Polling for accessibility permissions...")
+        
+        permissionCheckTimer = Timer(timeInterval: 0.5, repeats: true) { _ in
+            DispatchQueue.main.async {
+                // Check permissions like alt-tab-macos does
+                let hasPermissions = AXIsProcessTrusted()
+                
+                if !self.preStartupPermissionsPassed {
+                    if hasPermissions {
+                        print("✅ Accessibility permissions detected!")
+                        self.permissionCheckTimer?.invalidate()
+                        self.preStartupPermissionsPassed = true
+                        startupBlock()  // This calls continueAppStartup()
+                    } else {
+                        print("⏳ Still waiting for accessibility permissions...")
+                    }
+                } else {
+                    // Monitor for permission removal after startup (like alt-tab-macos)
+                    if !hasPermissions {
+                        print("❌ Accessibility permissions were revoked - restarting app")
+                        self.restartApp()
+                    }
+                }
+            }
+        }
+        
+        RunLoop.main.add(permissionCheckTimer!, forMode: .common)
+    }
+    
+    private func continueAppStartup() {
+        print("🚀 continueAppStartup() called - setting up app functionality")
+        print("✅ Accessibility permissions granted - continuing startup")
+        
+        // Create overlay window once at startup
+        overlayWindow = NativeStyleOverlay(
+            contentRect: NSRect.zero,
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        
+        // Warm up performance cache in background
+        DispatchQueue.global(qos: .background).async {
+            _ = PerformanceCache.shared.getCachedRunningApps()
+            print("📦 Performance cache warmed up")
+        }
+        
+        // Disable native Cmd+Tab
+        setNativeCommandTabEnabled(false)
+        print("🚫 Native Cmd+Tab disabled")
+        
+        // Global key monitoring for events outside our app
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
+            self?.handleGlobalEvent(event)
+        }
+        
+        // Local key monitoring for events within our app (when switcher is active)
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
+            return self?.handleLocalEvent(event) ?? event
+        }
+        
+        print("⌨️  Press Cmd+Tab to activate AX-based window switcher")
+        print("⌨️  Press Cmd+` to cycle through current app windows")
+        print("🔍 Using Accessibility API for comprehensive window detection")
+        
+        // Permission monitoring is now handled by the polling timer
+    }
+    
+    private func restartApp() {
+        print("🔄 Restarting SimpleWindowSwitcher...")
+        
+        // Use alt-tab-macos approach: open -n (new instance)
+        let appPath = Bundle.main.bundlePath
+        let task = Process()
+        task.launchPath = "/usr/bin/open"
+        task.arguments = ["-n", appPath]  // -n flag for new instance
+        
+        // Small delay before restarting
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            task.launch()
+            NSApplication.shared.terminate(self)
+        }
     }
     
     func applicationWillTerminate(_ notification: Notification) {

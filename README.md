@@ -1,47 +1,90 @@
 # SimpleWindowSwitcher
 
-A minimal, lightweight window switcher for macOS that provides window-based navigation instead of application-based navigation for Cmd+Tab.
+An advanced window switcher for macOS that provides both global and app-specific window navigation with visual overlays.
 
 ## Features
 
-- **Window-based switching**: Navigate between individual windows, not just applications
-- **Minimal UI**: Simple list showing "App Name - Window Title" 
-- **No screenshots**: Just clean text-based window titles
-- **Lightweight**: ~300 lines of Swift code, no external dependencies
-- **Fast**: No heavy frameworks like AppCenter, Sparkle, etc.
+- **🖥️ Global Window Switching (Cmd+Tab)**: Visual overlay showing ALL windows from all apps
+- **🔄 App-Specific Switching (Cmd+`)**: Visual overlay showing only current app's windows
+- **🎯 Alt+Tab Behavior**: Immediately highlights last used window (no extra Tab needed)
+- **⚡ MRU Ordering**: Most Recently Used windows appear first for intelligent switching
+- **🎨 Visual Interface**: Beautiful native-style overlays with app icons and previews
+- **⌨️ Full Navigation**: Arrow keys, Tab/Shift+Tab, Escape to cancel
+- **🪶 Lightweight**: ~1150 lines of Swift, no external dependencies, 153KB executable
+- **🚀 Fast**: Optimized window discovery with caching and concurrent processing
+- **🔒 Smart Permissions**: Automatic permission detection with persistent setup (grant once, works forever)
+
+## Installation
+
+**Easy one-command install:**
+
+```bash
+git clone <this-repo>
+cd SimpleWindowSwitcher
+./install.sh
+```
+
+That's it! The script will:
+1. Build the app from source
+2. Install it to `/Applications/`  
+3. Launch it automatically
+4. **Automatically handle accessibility permissions** - just grant them once and you're done!
+
+### First-Time Setup
+- When you first run the app, it will request accessibility permissions
+- Click "Open System Preferences & Continue" 
+- Enable SimpleWindowSwitcher in Privacy & Security → Accessibility
+- **No restart needed!** The app automatically detects permissions and starts working
+- **Permissions persist** across app restarts - grant once, use forever!
 
 ## Usage
 
-1. **Build and run**:
-   ```bash
-   swift build
-   .build/debug/SimpleWindowSwitcher
-   ```
+### Global Window Switching (Cmd+Tab)
+- Shows **ALL windows** from all applications
+- **Immediately highlights** the last used window
+- Navigate with **arrow keys** or **Tab/Shift+Tab**
+- **Release Cmd** to activate selected window
 
-2. **Grant accessibility permissions** when prompted (required for window switching)
+### App-Specific Switching (Cmd+`)
+- Shows **only windows** from the current application  
+- Same visual interface as Cmd+Tab
+- Perfect for cycling through multiple browser tabs, Finder windows, etc.
+- Navigate with **arrow keys** or **repeated Cmd+`**
 
-3. **Use the switcher**:
-   - Press `Cmd+Tab` to open the window switcher
-   - Use `Tab` / `Shift+Tab` to navigate through windows
-   - Press `Enter` to switch to selected window
-   - Press `Escape` to cancel
-   - Release `Cmd` key to auto-activate selected window
+### Navigation Controls
+- **Arrow Keys**: Navigate in any direction
+- **Tab/Shift+Tab**: Forward/backward navigation
+- **Escape**: Cancel without switching
+- **Cmd+Shift+Tab**: Reverse global navigation
+- **Cmd+Shift+`**: Reverse app navigation
 
 ## Requirements
 
-- macOS 10.15+
-- Accessibility permissions (app will prompt and open System Preferences)
+- **macOS 10.15+**
+- **Accessibility permissions** (automatically guided setup - no technical knowledge needed)
+- **Xcode Command Line Tools** (for building from source)
 
-## How it works
+## Architecture
 
-- Uses Core Graphics APIs (`CGWindowListCopyWindowInfo`) to enumerate windows
-- Uses Carbon framework to register global hotkeys
-- Uses Accessibility APIs (`AXUIElement`) to activate windows
-- Simple AppKit UI with NSTableView for window list
+- **Window Discovery**: Accessibility APIs + brute force enumeration for comprehensive coverage
+- **Performance**: Cached running apps, lazy icon loading, concurrent window processing  
+- **UI**: Native NSWindow overlays with visual effects and animations
+- **Hotkeys**: Global event monitoring with proper key capture and native Cmd+Tab override
+- **Memory**: Efficient MRU tracking with automatic cleanup
+
+## Development
+
+```bash
+# Development mode (run without installing)
+./run.sh
+
+# Build only
+swift build -c release
+```
 
 ## Size Comparison
 
-- **SimpleWindowSwitcher**: 95KB executable (383 lines of Swift code)
-- **alt-tab-macos**: 495MB (732KB source + 141MB Pods + 22MB scripts + docs)
+- **SimpleWindowSwitcher**: 153KB executable
+- **alt-tab-macos**: 495MB+ with dependencies
 
-**That's 5,200x smaller!** This app does exactly what you need without the bloat! 
+**Over 3,200x smaller** while providing advanced features! 
