@@ -1077,7 +1077,9 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
     private var preStartupPermissionsPassed = false
     
     private func ensurePermissionsAreGranted(_ continueAppStartup: @escaping () -> Void) {
-        let hasPermissions = AXIsProcessTrusted()
+        // Use more reliable permission checking API
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false]
+        let hasPermissions = AXIsProcessTrustedWithOptions(options as CFDictionary)
         print("🔍 Checking accessibility permissions: \(hasPermissions)")
         
         if hasPermissions {
@@ -1126,13 +1128,15 @@ class SimpleWindowSwitcher: NSObject, NSApplicationDelegate {
         
         permissionCheckTimer = Timer(timeInterval: 0.5, repeats: true) { _ in
             DispatchQueue.main.async {
-                // Check permissions like alt-tab-macos does
-                let hasPermissions = AXIsProcessTrusted()
+                // Use more reliable permission checking API for polling too
+                let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false]
+                let hasPermissions = AXIsProcessTrustedWithOptions(options as CFDictionary)
                 
                 if !self.preStartupPermissionsPassed {
                     if hasPermissions {
                         print("✅ Accessibility permissions detected!")
                         self.permissionCheckTimer?.invalidate()
+                        self.permissionCheckTimer = nil
                         self.preStartupPermissionsPassed = true
                         startupBlock()  // This calls continueAppStartup()
                     } else {
